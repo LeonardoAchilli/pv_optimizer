@@ -17,8 +17,15 @@ def get_pvgis_data(latitude: float, longitude: float) -> pd.DataFrame:
         'aspect': 0, 'raddatabase': 'PVGIS-SARAH2', 'startyear': 2020,
         'endyear': 2020, 'step': 15
     }
+    
+    # --- FIX 1: Add a User-Agent header to the request ---
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'
+    }
+    
     try:
-        response = requests.get(api_url, params=params, timeout=30)
+        # Pass the headers with the request
+        response = requests.get(api_url, params=params, headers=headers, timeout=30)
         response.raise_for_status()
         lines = response.text.splitlines()
         data_start_line = 0
@@ -36,6 +43,7 @@ def get_pvgis_data(latitude: float, longitude: float) -> pd.DataFrame:
         st.error(f"Error fetching PVGIS data: {e}")
         return None
 
+# (The run_simulation and find_optimal_system functions remain exactly the same)
 def run_simulation(pv_kwp, bess_kwh_nominal, pvgis_baseline_data, consumption_profile, config):
     """Runs the full 10-year simulation. (Content is identical to previous steps)."""
     dod, c_rate, charge_eff, discharge_eff, pv_degr_rate, bess_cal_degr_rate = (
@@ -103,7 +111,7 @@ def find_optimal_system(user_inputs, config, pvgis_baseline):
     max_kwp_from_budget = user_inputs['budget'] / 650
     max_kwp = min(max_kwp_from_area, max_kwp_from_budget)
     max_kwh = user_inputs['budget'] / 150
-    kwp_step = max(5, int(max_kwp / 10)) # Make steps proportional to the search space
+    kwp_step = max(5, int(max_kwp / 10))
     kwh_step = max(10, int(max_kwh / 10))
     pv_search_range = range(kwp_step, int(max_kwp) + kwp_step, kwp_step)
     bess_search_range = range(0, int(max_kwh) + kwh_step, kwh_step)
@@ -136,24 +144,19 @@ def build_ui():
     st.title("☀️ Optimal PV & BESS Sizing Calculator")
     st.markdown("This tool helps you find the most financially viable Photovoltaic (PV) and Battery Energy Storage System (BESS) based on your specific needs.")
 
-    # --- Sidebar for User Inputs ---
     with st.sidebar:
         st.header("1. Your Project Constraints")
         budget = st.number_input("Maximum Budget (€)", min_value=10000, max_value=500000, value=80000, step=1000)
         available_area_m2 = st.number_input("Available Area for PV (m²)", min_value=10, max_value=1000, value=400, step=10)
-        
         st.header("2. Your Location")
         lat = st.number_input("Latitude", value=41.9, format="%.4f")
         lon = st.number_input("Longitude", value=12.5, format="%.4f")
-
         st.header("3. Your Consumption Profile")
         uploaded_file = st.file_uploader(
-            "Upload your 15-minute consumption data (CSV)",
-            type="csv",
+            "Upload your 15-minute consumption data (CSV)", type="csv",
             help="The CSV must have one column named 'consumption_kWh' with 35,040 rows for one year."
         )
 
-    # --- Main App Logic ---
     if uploaded_file is not None:
         try:
             consumption_df = pd.read_csv(uploaded_file)
@@ -167,13 +170,7 @@ def build_ui():
             return
             
         if st.button("🚀 Find Optimal System"):
-            # Prepare inputs for the optimizer
-            user_inputs = {
-                "budget": budget,
-                "available_area_m2": available_area_m2,
-                "consumption_profile_df": consumption_df
-            }
-            # System configuration (from our validated logic)
+            user_inputs = { "budget": budget, "available_area_m2": available_area_m2, "consumption_profile_df": consumption_df }
             config = {
                 'bess_dod': 0.85, 'bess_c_rate': 0.7, 'bess_charge_eff': 0.95,
                 'bess_discharge_eff': 0.95, 'pv_degradation_rate': 0.01,
@@ -181,39 +178,32 @@ def build_ui():
                 'grid_price_sell': 0.05, 'wacc': 0.07
             }
             
+            # --- FIX 2: Initialize optimal_system to None and restructure logic ---
+            optimal_system = None 
             with st.spinner('Fetching solar data and running thousands of simulations... This may take a moment.'):
-                # 1. Fetch PV data
                 pvgis_baseline = get_pvgis_data(lat, lon)
-                
                 if pvgis_baseline is not None:
-                    # 2. Run Optimizer
                     optimal_system = find_optimal_system(user_inputs, config, pvgis_baseline)
             
-            st.success("Optimization Complete!")
-
-            # --- Display Results ---
             if optimal_system:
+                st.success("Optimization Complete!")
                 st.header("🏆 Optimal System Recommendation")
-                
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Optimal PV Size (kWp)", f"{optimal_system['optimal_kwp']}")
                 col2.metric("Optimal BESS Size (kWh)", f"{optimal_system['optimal_kwh']}")
                 col3.metric("Payback Period (Years)", f"{optimal_system['payback_period_years']:.2f}")
-
                 st.subheader("Financial Details")
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Total System Cost (CAPEX)", f"€ {optimal_system['total_capex_eur']:,.2f}")
                 col2.metric("Project NPV", f"€ {optimal_system['npv_eur']:,.2f}")
-                
                 st.subheader("Performance Metrics")
                 col1, col2 = st.columns(2)
                 col1.metric("Grid Self-Sufficiency", f"{optimal_system['self_sufficiency_rate'] * 100:.1f} %")
                 col2.metric("BESS Final State of Health", f"{optimal_system['final_soh_percent']:.1f} %")
             else:
-                st.error("No viable system could be found within your budget and area constraints. Try increasing the budget.")
+                st.error("Could not complete optimization. This is likely due to the PVGIS data error above. Please try again later or check the location data.")
     else:
         st.info("Please upload a consumption data file to begin.")
 
-# This is the entry point of the script
 if __name__ == "__main__":
     build_ui()
