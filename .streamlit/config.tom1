@@ -1,6 +1,6 @@
 [theme]
 # Primary color for interactive elements
-primaryColor = "#FF9900"
+primaryColor = "#1E88E5"
 
 # Background color for the main content area
 backgroundColor = "#FFFFFF"
