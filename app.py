@@ -308,6 +308,11 @@ def find_optimal_system(user_inputs, config, pvgis_baseline):
     
     max_kwh = user_inputs['budget'] / 150  # Minimum battery cost
     
+    # Ensure we have valid search ranges
+    if max_kwp < 5:
+        st.error(f"Budget too low! Minimum PV system costs ~€3,250 (5 kWp). Your budget allows max {max_kwp:.1f} kWp")
+        return None
+    
     # Define search ranges with adaptive step sizes
     kwp_step = max(5, int(max_kwp / 20))  # More granular search
     kwh_step = max(5, int(max_kwh / 20))
@@ -315,10 +320,15 @@ def find_optimal_system(user_inputs, config, pvgis_baseline):
     pv_search_range = range(kwp_step, int(max_kwp) + kwp_step, kwp_step)
     bess_search_range = range(0, int(max_kwh) + kwh_step, kwh_step)
     
+    # Debug information
+    st.info(f"Searching PV sizes: {kwp_step} to {int(max_kwp)} kWp (step: {kwp_step})")
+    st.info(f"Searching battery sizes: 0 to {int(max_kwh)} kWh (step: {kwh_step})")
+    
     # Initialize search variables
     best_result = None
     min_payback = float('inf')
     results_matrix = []
+    valid_solutions = 0
     
     # Progress tracking
     progress_bar = st.progress(0)
@@ -345,6 +355,7 @@ def find_optimal_system(user_inputs, config, pvgis_baseline):
                 break  # Skip remaining battery sizes for this PV size
             
             battery_found_within_budget = True
+            valid_solutions += 1
             
             # Run vectorized simulation
             result = run_simulation_vectorized(pv_kwp, bess_kwh, pvgis_baseline, 
@@ -356,9 +367,9 @@ def find_optimal_system(user_inputs, config, pvgis_baseline):
             results_matrix.append(result)
             
             # Track best result (minimum payback period)
-            if result['payback_period_years'] < min_payback:
+            if result['payback_period_years'] < min_payback and result['payback_period_years'] < float('inf'):
                 min_payback = result['payback_period_years']
-                best_result = result
+                best_result = result.copy()
                 best_result['optimal_kwp'] = pv_kwp
                 best_result['optimal_kwh'] = bess_kwh
         
@@ -367,6 +378,9 @@ def find_optimal_system(user_inputs, config, pvgis_baseline):
             break
     
     progress_bar.empty()
+    
+    # Show summary
+    st.success(f"✅ Analyzed {valid_solutions} valid configurations")
     
     # Add results matrix to best result for visualization
     if best_result:
@@ -509,12 +523,20 @@ def build_ui():
             
             actual_rows = len(consumption_df)
             
-            if actual_rows != expected_rows:
+            # Validate consumption data length
+            if len(consumption_df) != expected_rows:
                 st.warning(f"""
                     ⚠️ Warning: Expected {expected_rows:,} rows but found {actual_rows:,} rows.
                     The simulation assumes 1 year of 15-minute data.
-                    Results may be inaccurate.
+                    Adjusting data to match expected length...
                 """)
+                # Trim or pad the data to match expected length
+                if len(consumption_df) > expected_rows:
+                    consumption_df = consumption_df.iloc[:expected_rows]
+                else:
+                    # Repeat the pattern to fill missing data
+                    repeats_needed = (expected_rows // len(consumption_df)) + 1
+                    consumption_df = pd.concat([consumption_df] * repeats_needed).iloc[:expected_rows].reset_index(drop=True)
             
             # Display consumption statistics
             st.subheader("📊 Consumption Profile Summary")
@@ -578,8 +600,45 @@ def build_ui():
                 if pvgis_baseline is not None and not pvgis_baseline.empty:
                     st.success("✅ Solar data retrieved successfully!")
                     
-                    # Run optimization
-                    optimal_system = find_optimal_system(user_inputs, config, pvgis_baseline)
+                    # Debug info
+                    with st.expander("🔍 Debug Information"):
+                        st.write(f"PVGIS data points: {len(pvgis_baseline)}")
+                        st.write(f"Consumption data points: {len(consumption_df)}")
+                        st.write(f"Budget: €{budget:,.0f}")
+                        st.write(f"Available area: {available_area_m2} m²")
+                        st.write(f"Max PV from area: {available_area_m2 / 5.0:.1f} kWp")
+                        st.write(f"Max PV from budget: {budget / 650:.1f} kWp")
+                        
+                    # Ensure data consistency
+                    if len(pvgis_baseline) != len(consumption_df):
+                        st.error(f"Data mismatch: PVGIS has {len(pvgis_baseline)} points, consumption has {len(consumption_df)} points")
+                        # Try to align data
+                        min_len = min(len(pvgis_baseline), len(consumption_df))
+                        pvgis_baseline = pvgis_baseline.iloc[:min_len]
+                        consumption_df = consumption_df.iloc[:min_len]
+                        st.warning(f"Trimmed both datasets to {min_len} points")
+                    
+                    # Run optimization with error handling
+                    try:
+                        optimal_system = find_optimal_system(user_inputs, config, pvgis_baseline)
+                        
+                        if optimal_system is None:
+                            st.error("❌ No valid solution found!")
+                            st.warning("""
+                            **Possible reasons:**
+                            - Budget too low for any viable system
+                            - No combination meets the constraints
+                            
+                            **Try:**
+                            - Increasing the budget (€150,000+)
+                            - Checking your consumption data
+                            """)
+                        
+                    except Exception as e:
+                        st.error(f"❌ Error during optimization: {str(e)}")
+                        with st.expander("Show full error"):
+                            st.exception(e)
+                
                 else:
                     st.error("❌ Could not retrieve solar data. Please check your location or try again later.")
                     st.info("""
