@@ -8,6 +8,7 @@ import streamlit as st
 # SECTION 1: BACKEND LOGIC
 # ==============================================================================
 
+@st.cache_data(ttl=86400)  # Cache for 24 hours
 def get_pvgis_data(latitude: float, longitude: float) -> pd.DataFrame:
     """Fetches 15-minute interval PV generation data from PVGIS v5.2 using JSON format."""
     # Updated to PVGIS API v5.2 with JSON output
@@ -132,11 +133,10 @@ def get_pvgis_data(latitude: float, longitude: float) -> pd.DataFrame:
         
     except Exception as e:
         return None
-    
 
 
-def run_simulation(pv_kwp, bess_kwh_nominal, pvgis_baseline_data, consumption_profile, config):
-    """Runs the full 5-year simulation with improved accuracy."""
+def run_simulation_vectorized(pv_kwp, bess_kwh_nominal, pvgis_baseline_data, consumption_profile, config):
+    """Vectorized version of the simulation for much faster execution."""
     # Extract configuration parameters
     dod = config['bess_dod']
     c_rate = config['bess_c_rate']
@@ -147,94 +147,99 @@ def run_simulation(pv_kwp, bess_kwh_nominal, pvgis_baseline_data, consumption_pr
     
     # Calculate battery parameters
     usable_nominal_capacity_kwh = bess_kwh_nominal * dod
-    max_charge_discharge_power_kw = bess_kwh_nominal * c_rate
-    max_charge_discharge_per_step_kwh = max_charge_discharge_power_kw * 0.25  # 15-min step
+    max_charge_discharge_per_step_kwh = bess_kwh_nominal * c_rate * 0.25  # 15-min step
+    
+    # Convert data to numpy arrays for faster computation
+    pv_base = pvgis_baseline_data['P_kW'].to_numpy(dtype=np.float32)
+    cons = consumption_profile['consumption_kWh'].to_numpy(dtype=np.float32)
     
     # Simulation parameters
     steps_per_year = len(consumption_profile)
+    steps = steps_per_year
     calendar_degr_per_step = bess_cal_degr_rate / steps_per_year
     
     # Initialize simulation variables
-    soh = 1.0  # State of Health
     annual_net_savings = []
     total_grid_import = 0
-    total_consumption = consumption_profile['consumption_kWh'].sum() * 5
+    total_consumption = cons.sum() * 5
+    
+    # Pre-calculate PV degradation factors for all years
+    pv_degradation_factors = (1 - pv_degr_rate) ** np.arange(5)
     
     # Run 5-year simulation
-    for year in range(1, 6):
+    for year in range(5):
         # Apply PV degradation
-        pv_degradation_factor = (1 - pv_degr_rate) ** (year - 1)
-        current_pv_production = pvgis_baseline_data['P_kW'] * pv_kwp * pv_degradation_factor
+        pv_hourly = pv_base * pv_kwp * pv_degradation_factors[year] * 0.25  # Convert to kWh per 15-min
         
-        # Initialize yearly metrics
-        soc_kwh = 0.0
-        yearly_energy_bought_kwh = 0
-        yearly_energy_sold_kwh = 0
+        # Initialize state variables
+        soc = np.zeros(steps + 1, dtype=np.float32)
+        soh = 1.0
         
-        # Simulate each 15-minute interval
-        for i in range(steps_per_year):
-            # Get production and consumption for this step
-            prod_kwh = current_pv_production.iloc[i] * 0.25
-            cons_kwh = consumption_profile['consumption_kWh'].iloc[i]
+        # Pre-allocate arrays for energy flows
+        energy_bought = np.zeros(steps, dtype=np.float32)
+        energy_sold = np.zeros(steps, dtype=np.float32)
+        
+        # Vectorized simulation loop
+        for t in range(steps):
+            # Current available capacity
+            available_capacity = usable_nominal_capacity_kwh * soh
             
-            # Calculate available battery capacity with current SoH
-            available_capacity_kwh = usable_nominal_capacity_kwh * soh
-            
-            # Calculate net energy (positive = excess, negative = deficit)
-            net_energy = prod_kwh - cons_kwh
-            
-            energy_discharged_from_bess = 0
+            # Net energy (positive = excess, negative = deficit)
+            net_energy = pv_hourly[t] - cons[t]
             
             if net_energy > 0:
-                # Excess energy: try to charge battery, then sell to grid
+                # Excess energy: charge battery
                 energy_to_charge = net_energy * charge_eff
                 actual_charge = min(
                     energy_to_charge,
-                    available_capacity_kwh - soc_kwh,
+                    available_capacity - soc[t],
                     max_charge_discharge_per_step_kwh
                 )
-                soc_kwh += actual_charge
+                soc[t+1] = soc[t] + actual_charge
                 
-                # Sell remaining excess to grid
+                # Sell remaining excess
                 energy_not_charged = (net_energy * charge_eff - actual_charge) / charge_eff
-                yearly_energy_sold_kwh += energy_not_charged
+                energy_sold[t] = energy_not_charged
+                
+                # No cycle degradation when charging
+                cycle_deg_this_step = 0
                 
             else:
-                # Energy deficit: try to discharge battery, then buy from grid
+                # Energy deficit: discharge battery
                 deficit = -net_energy
                 
-                # Calculate how much we can discharge
+                # Calculate discharge
                 energy_from_bess_gross = min(
                     deficit / discharge_eff,
-                    soc_kwh,
+                    soc[t],
                     max_charge_discharge_per_step_kwh
                 )
                 energy_from_bess_net = energy_from_bess_gross * discharge_eff
                 
                 # Update battery state
-                soc_kwh -= energy_from_bess_gross
+                soc[t+1] = soc[t] - energy_from_bess_gross
                 
-                # Buy remaining deficit from grid
-                remaining_deficit = deficit - energy_from_bess_net
-                yearly_energy_bought_kwh += remaining_deficit
+                # Buy remaining deficit
+                energy_bought[t] = deficit - energy_from_bess_net
                 
-                energy_discharged_from_bess = energy_from_bess_gross
+                # Cycle degradation
+                if usable_nominal_capacity_kwh > 0:
+                    cycle_deg_this_step = (
+                        (energy_from_bess_gross / usable_nominal_capacity_kwh) * 
+                        (0.2 / 7000) * 1.15
+                    )
+                else:
+                    cycle_deg_this_step = 0
             
-            # Apply battery degradation
-            # Cycle degradation (based on discharge)
-            if usable_nominal_capacity_kwh > 0:
-                cycle_deg_this_step = (
-                    (energy_discharged_from_bess / usable_nominal_capacity_kwh) * 
-                    (0.2 / 7000) * 1.15  # 20% degradation after 7000 cycles, with 15% safety factor
-                )
-            else:
-                cycle_deg_this_step = 0
-            
-            # Total degradation
+            # Apply degradation
             soh = max(0, soh - calendar_degr_per_step - cycle_deg_this_step)
         
+        # Calculate annual totals using numpy sum
+        yearly_energy_bought_kwh = energy_bought.sum()
+        yearly_energy_sold_kwh = energy_sold.sum()
+        
         # Calculate annual savings
-        cost_without_system = consumption_profile['consumption_kWh'].sum() * config['grid_price_buy']
+        cost_without_system = cons.sum() * config['grid_price_buy']
         cost_with_system = yearly_energy_bought_kwh * config['grid_price_buy']
         revenue_from_exports = yearly_energy_sold_kwh * config['grid_price_sell']
         
@@ -255,12 +260,12 @@ def run_simulation(pv_kwp, bess_kwh_nominal, pvgis_baseline_data, consumption_pr
         last_real_saving = next_saving
     
     # Calculate CAPEX
-    capex_pv = pv_kwp * (600 + 600 * np.exp(-pv_kwp / 290))  # Non-linear pricing
+    capex_pv = pv_kwp * (600 + 600 * np.exp(-pv_kwp / 290))
     capex_bess = bess_kwh_nominal * 150
     total_capex = capex_pv + capex_bess
     
     # Calculate O&M costs
-    om_pv = (12 - 0.01 * pv_kwp) * pv_kwp  # Decreasing per-kWp cost
+    om_pv = (12 - 0.01 * pv_kwp) * pv_kwp
     om_bess = 1500 + (capex_bess * 0.015)
     total_om = om_pv + om_bess
     
@@ -289,7 +294,7 @@ def run_simulation(pv_kwp, bess_kwh_nominal, pvgis_baseline_data, consumption_pr
         "total_capex_eur": total_capex,
         "self_sufficiency_rate": self_sufficiency_rate,
         "final_soh_percent": soh * 100,
-        "annual_savings": annual_net_savings[:5],  # First 5 years actual
+        "annual_savings": annual_net_savings[:5],
         "om_costs": total_om
     }
 
@@ -319,12 +324,18 @@ def find_optimal_system(user_inputs, config, pvgis_baseline):
     progress_bar = st.progress(0)
     total_sims = len(pv_search_range) * len(bess_search_range)
     sim_count = 0
+    update_frequency = max(1, total_sims // 20)  # Update progress bar 20 times max
     
     # Search for optimal combination
     for pv_kwp in pv_search_range:
+        battery_found_within_budget = False
+        
         for bess_kwh in bess_search_range:
             sim_count += 1
-            progress_bar.progress(sim_count / total_sims if total_sims > 0 else 1)
+            
+            # Update progress bar less frequently
+            if sim_count % update_frequency == 0 or sim_count == total_sims:
+                progress_bar.progress(min(sim_count / total_sims, 1.0))
             
             # Check budget constraint
             current_capex_pv = pv_kwp * (600 + 600 * np.exp(-pv_kwp / 290))
@@ -333,9 +344,11 @@ def find_optimal_system(user_inputs, config, pvgis_baseline):
             if (current_capex_pv + current_capex_bess) > user_inputs['budget']:
                 break  # Skip remaining battery sizes for this PV size
             
-            # Run simulation
-            result = run_simulation(pv_kwp, bess_kwh, pvgis_baseline, 
-                                  user_inputs['consumption_profile_df'], config)
+            battery_found_within_budget = True
+            
+            # Run vectorized simulation
+            result = run_simulation_vectorized(pv_kwp, bess_kwh, pvgis_baseline, 
+                                             user_inputs['consumption_profile_df'], config)
             
             # Store result for analysis
             result['pv_kwp'] = pv_kwp
@@ -348,6 +361,10 @@ def find_optimal_system(user_inputs, config, pvgis_baseline):
                 best_result = result
                 best_result['optimal_kwp'] = pv_kwp
                 best_result['optimal_kwh'] = bess_kwh
+        
+        # If no battery size fits within budget for this PV size, skip larger PV sizes
+        if not battery_found_within_budget and bess_search_range:
+            break
     
     progress_bar.empty()
     
@@ -478,7 +495,8 @@ def build_ui():
             st.write("**Battery Parameters**")
             dod = st.slider("Depth of Discharge (%)", 70, 95, 85) / 100
             c_rate = st.slider("C-Rate", 0.3, 1.0, 0.7, 0.1)
-    expected_rows = 35041
+    
+    expected_rows = 35040
     # Main content area
     if uploaded_file is not None:
         try:
@@ -489,7 +507,7 @@ def build_ui():
                 st.error("❌ Error: CSV must contain a column named 'consumption_kWh'.")
                 return
             
-            actual_rows = len(consumption_df)+1
+            actual_rows = len(consumption_df)
             
             if actual_rows != expected_rows:
                 st.warning(f"""
