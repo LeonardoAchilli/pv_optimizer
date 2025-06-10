@@ -1,24 +1,23 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import requests
-from io import StringIO
 import json
+import numpy as np
+import pandas as pd
+import requests
+import streamlit as st
 
 # ==============================================================================
 # SECTION 1: BACKEND LOGIC
 # ==============================================================================
 
 def get_pvgis_data(latitude: float, longitude: float) -> pd.DataFrame:
-    """Fetches 15-minute interval PV generation data from PVGIS v5.2."""
-    # Updated to PVGIS API v5.2
+    """Fetches 15-minute interval PV generation data from PVGIS v5.2 using JSON format."""
+    # Updated to PVGIS API v5.2 with JSON output
     api_url = "https://re.jrc.ec.europa.eu/api/v5_2/seriescalc"
     
-    # Updated parameters for the new API version
+    # Parameters for JSON output - much more reliable than CSV
     params = {
         'lat': latitude,
         'lon': longitude,
-        'outputformat': 'csv',
+        'outputformat': 'json',  # Changed to JSON
         'pvcalculation': 1,
         'peakpower': 1,
         'loss': 0,
@@ -27,146 +26,114 @@ def get_pvgis_data(latitude: float, longitude: float) -> pd.DataFrame:
         'raddatabase': 'PVGIS-SARAH2',
         'startyear': 2020,
         'endyear': 2020,
-        'usehorizon': 1,  # include horizon effects
-        'mountingplace': 'free',  # free-standing
-        'pvtechchoice': 'crystSi',  # crystalline silicon
-        'trackingtype': 0  # fixed mounting
+        'usehorizon': 1,
+        'mountingplace': 'free',
+        'pvtechchoice': 'crystSi',
+        'trackingtype': 0
     }
     
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
     
-    # Debug info
-    st.info(f"Requesting solar data for location: {latitude:.4f}°N, {longitude:.4f}°E")
-    
     try:
         response = requests.get(api_url, params=params, headers=headers, timeout=30)
         response.raise_for_status()
         
-        # Parse the CSV response
-        lines = response.text.splitlines()
+        # Parse JSON response
+        data = response.json()
         
-        # Debug: Show first few lines
-        if len(lines) > 0:
-            st.info(f"PVGIS Response received: {len(lines)} lines")
-        
-        # Find the start of the actual data
-        data_start_line = 0
-        header_line = None
-        for i, line in enumerate(lines):
-            if 'time' in line.lower() and ('P' in line or 'G(i)' in line):
-                data_start_line = i
-                header_line = line
-                break
-        
-        if data_start_line == 0:
-            st.error("Could not find data header in PVGIS response")
-            # Show response for debugging
-            with st.expander("Show raw PVGIS response"):
-                st.text(response.text[:1000])
-            return None
-        
-        # Debug: Show header found
-        st.success(f"Found data header at line {data_start_line}: {header_line}")
+        # Extract hourly data
+        if 'outputs' in data and 'hourly' in data['outputs']:
+            hourly_data = data['outputs']['hourly']
             
-        # Extract the CSV data
-        csv_data = StringIO('\n'.join(lines[data_start_line:]))
-        df = pd.read_csv(csv_data)
-        
-        # Debug: Show dataframe info
-        st.info(f"Parsed dataframe: {len(df)} rows, columns: {list(df.columns)}")
-        
-        # Check if 'time' column exists
-        if 'time' not in df.columns:
-            st.error(f"'time' column not found. Available columns: {list(df.columns)}")
-            return None
-        
-        # Convert time column to datetime with robust parsing
-        try:
-            # First, let's see what the time format looks like
-            sample_time = df['time'].iloc[0]
-            st.info(f"Sample time value: '{sample_time}'")
+            # Convert to DataFrame
+            df = pd.DataFrame(hourly_data)
             
-            # Try different formats
-            try:
-                df['time'] = pd.to_datetime(df['time'], format='%Y%m%d:%H%M')
-            except:
-                try:
-                    # Try ISO format
-                    df['time'] = pd.to_datetime(df['time'])
-                except:
-                    # Try without format
-                    df['time'] = pd.to_datetime(df['time'], dayfirst=False)
-            
+            # Convert time column to datetime
+            df['time'] = pd.to_datetime(df['time'], format='%Y%m%d:%H%M')
             df = df.set_index('time')
             
-        except Exception as e:
-            st.error(f"Error parsing datetime: {e}")
-            st.error(f"First few time values: {df['time'].head().tolist()}")
-            return None
-        
-        # Convert power from W to kW
-        if 'P' in df.columns:
-            df['P_kW'] = df['P'] / 1000.0
+            # Convert power from W to kW
+            if 'P' in df.columns:
+                df['P_kW'] = df['P'] / 1000.0
+            else:
+                return None
+            
+            # Resample to 15-minute intervals if we have hourly data
+            if len(df) < 35040:  # If we have hourly data (8760 hours in a year)
+                df_resampled = df[['P_kW']].resample('15min').interpolate(method='linear')
+                return df_resampled
+            
+            return df[['P_kW']]
+            
         else:
-            st.error(f"'P' column not found. Available columns: {list(df.columns)}")
             return None
-        
-        # Resample to 15-minute intervals if needed
-        if len(df) < 35040:  # If we have hourly data
-            st.info(f"Resampling from {len(df)} hourly to 15-minute intervals...")
-            df = df.resample('15min').interpolate(method='linear')
-        
-        st.success(f"Successfully retrieved {len(df)} data points")
-        return df[['P_kW']]
-    
+            
     except requests.exceptions.HTTPError as e:
-        st.error(f"HTTP Error {e.response.status_code}: {e.response.text}")
-        # Try alternative endpoint or database
-        st.warning("Trying alternative database (ERA5)...")
+        # Try with ERA5 database as fallback
+        params['raddatabase'] = 'PVGIS-ERA5'
+        
         try:
-            params['raddatabase'] = 'PVGIS-ERA5'  # Try ERA5 as fallback
             response = requests.get(api_url, params=params, headers=headers, timeout=30)
             response.raise_for_status()
             
-            # Same parsing logic...
-            lines = response.text.splitlines()
-            data_start_line = 0
-            for i, line in enumerate(lines):
-                if 'time' in line.lower() and ('P' in line or 'G(i)' in line):
-                    data_start_line = i
-                    break
+            data = response.json()
+            
+            if 'outputs' in data and 'hourly' in data['outputs']:
+                hourly_data = data['outputs']['hourly']
+                df = pd.DataFrame(hourly_data)
+                df['time'] = pd.to_datetime(df['time'], format='%Y%m%d:%H%M')
+                df = df.set_index('time')
+                
+                if 'P' in df.columns:
+                    df['P_kW'] = df['P'] / 1000.0
                     
-            if data_start_line == 0:
-                st.error("Could not find data header in ERA5 response")
+                    if len(df) < 35040:
+                        df_resampled = df[['P_kW']].resample('15min').interpolate(method='linear')
+                        return df_resampled
+                    
+                    return df[['P_kW']]
+                else:
+                    return None
+            else:
                 return None
                 
-            csv_data = StringIO('\n'.join(lines[data_start_line:]))
-            df = pd.read_csv(csv_data)
-            
-            # Convert time with robust parsing
-            try:
-                df['time'] = pd.to_datetime(df['time'], format='%Y%m%d:%H%M')
-            except:
-                try:
-                    df['time'] = pd.to_datetime(df['time'])
-                except:
-                    df['time'] = pd.to_datetime(df['time'], infer_datetime_format=True)
-            
-            df = df.set_index('time')
-            df['P_kW'] = df['P'] / 1000.0
-            if len(df) < 35040:
-                df = df.resample('15min').interpolate(method='linear')
-            
-            st.success(f"Successfully retrieved {len(df)} data points from ERA5")
-            return df[['P_kW']]
         except Exception as e2:
-            st.error(f"Error with ERA5 fallback: {e2}")
-            return None
-    except Exception as e:
-        st.error(f"Error: {e}")
+            # Last resort: try without specifying database
+            params.pop('raddatabase', None)
+            
+            try:
+                response = requests.get(api_url, params=params, headers=headers, timeout=30)
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                if 'outputs' in data and 'hourly' in data['outputs']:
+                    hourly_data = data['outputs']['hourly']
+                    df = pd.DataFrame(hourly_data)
+                    df['time'] = pd.to_datetime(df['time'], format='%Y%m%d:%H%M')
+                    df = df.set_index('time')
+                    
+                    if 'P' in df.columns:
+                        df['P_kW'] = df['P'] / 1000.0
+                        
+                        if len(df) < 35040:
+                            df_resampled = df[['P_kW']].resample('15min').interpolate(method='linear')
+                            return df_resampled
+                        
+                        return df[['P_kW']]
+                    
+            except Exception as e3:
+                return None
+                
+    except json.JSONDecodeError as e:
         return None
+        
+    except Exception as e:
+        return None
+    
+
 
 def run_simulation(pv_kwp, bess_kwh_nominal, pvgis_baseline_data, consumption_profile, config):
     """Runs the full 5-year simulation with improved accuracy."""
@@ -326,6 +293,7 @@ def run_simulation(pv_kwp, bess_kwh_nominal, pvgis_baseline_data, consumption_pr
         "om_costs": total_om
     }
 
+
 def find_optimal_system(user_inputs, config, pvgis_baseline):
     """Finds the optimal PV and BESS combination with improved search algorithm."""
     # Calculate maximum feasible sizes
@@ -389,11 +357,12 @@ def find_optimal_system(user_inputs, config, pvgis_baseline):
     
     return best_result
 
+
 def build_ui():
     """Streamlit UI with enhanced features and error handling."""
     st.set_page_config(
         page_title="PV & BESS Optimizer",
-        page_icon="☀️",
+        page_icon="⚡",
         layout="wide",
         initial_sidebar_state="expanded"
     )
@@ -410,10 +379,11 @@ def build_ui():
         </style>
     """, unsafe_allow_html=True)
     
-    st.title("☀️ Optimal PV & BESS Sizing Calculator")
+    st.title("⚡ Optimal PV & BESS Sizing Calculator")
     st.markdown("""
-        This tool helps you find the most financially viable Photovoltaic (PV) and 
-        Battery Energy Storage System (BESS) configuration based on your specific needs.
+        ### Find the perfect solar + battery system for your needs
+        This tool optimizes Photovoltaic (PV) and Battery Energy Storage System (BESS) sizing 
+        based on your consumption data, location, and budget constraints.
     """)
     
     # Sidebar inputs
@@ -440,13 +410,49 @@ def build_ui():
         )
         
         st.subheader("2. Location")
+        st.caption("PVGIS covers Europe, Africa, and most of Asia")
+        
+        # Location presets
+        location_preset = st.selectbox(
+            "Quick location selection:",
+            ["Custom", "Rome, Italy", "Berlin, Germany", "Madrid, Spain", 
+             "Athens, Greece", "Cairo, Egypt", "Istanbul, Turkey"]
+        )
+        
+        # Set coordinates based on selection
+        if location_preset == "Rome, Italy":
+            default_lat, default_lon = 41.9028, 12.4964
+        elif location_preset == "Berlin, Germany":
+            default_lat, default_lon = 52.5200, 13.4050
+        elif location_preset == "Madrid, Spain":
+            default_lat, default_lon = 40.4168, -3.7038
+        elif location_preset == "Athens, Greece":
+            default_lat, default_lon = 37.9838, 23.7275
+        elif location_preset == "Cairo, Egypt":
+            default_lat, default_lon = 30.0444, 31.2357
+        elif location_preset == "Istanbul, Turkey":
+            default_lat, default_lon = 41.0082, 28.9784
+        else:
+            default_lat, default_lon = 41.9028, 12.4964
+        
         col1, col2 = st.columns(2)
         with col1:
-            lat = st.number_input("Latitude", value=41.9, format="%.4f", 
+            lat = st.number_input("Latitude", value=default_lat, format="%.4f", 
+                                min_value=-90.0, max_value=90.0,
                                 help="Decimal degrees North")
         with col2:
-            lon = st.number_input("Longitude", value=12.5, format="%.4f",
+            lon = st.number_input("Longitude", value=default_lon, format="%.4f",
+                                min_value=-180.0, max_value=180.0,
                                 help="Decimal degrees East")
+        
+        # Test location button
+        if st.button("🧪 Test Location", help="Check if solar data is available for this location"):
+            with st.spinner("Testing location..."):
+                test_data = get_pvgis_data(lat, lon)
+                if test_data is not None and not test_data.empty:
+                    st.success(f"✅ Location valid! Solar data available for {lat:.2f}°N, {lon:.2f}°E")
+                else:
+                    st.error("❌ No solar data available for this location")
         
         st.subheader("3. Consumption Profile")
         uploaded_file = st.file_uploader(
@@ -483,7 +489,6 @@ def build_ui():
                 st.error("❌ Error: CSV must contain a column named 'consumption_kWh'.")
                 return
             
-            expected_rows = 35040
             actual_rows = len(consumption_df)
             
             if actual_rows != expected_rows:
@@ -559,6 +564,12 @@ def build_ui():
                     optimal_system = find_optimal_system(user_inputs, config, pvgis_baseline)
                 else:
                     st.error("❌ Could not retrieve solar data. Please check your location or try again later.")
+                    st.info("""
+                    💡 **Tips:**
+                    - PVGIS covers Europe, Africa, and most of Asia
+                    - Americas and Oceania are not covered
+                    - Try coordinates like: Rome (41.9, 12.5), Berlin (52.5, 13.4), Cairo (30.0, 31.2)
+                    """)
             
             # Display results
             if optimal_system:
@@ -707,11 +718,14 @@ def build_ui():
             0.128
             ...
             ```
+            
+            **Note**: 35,040 rows = 96 intervals/day × 365 days
         """)
         
         # Sample data generator
-        if st.button("Generate Sample Data"):
+        if st.button("📊 Generate Sample Data"):
             # Create realistic consumption profile
+            # 35040 = 96 intervals per day * 365 days
             hours = np.arange(0, 8760, 0.25)  # 15-min intervals for a year
             
             # Base load + daily pattern + seasonal variation + noise
@@ -726,6 +740,8 @@ def build_ui():
                 'consumption_kWh': consumption
             })
             
+            st.success(f"Generated {len(sample_df)} consumption data points")
+            
             csv = sample_df.to_csv(index=False)
             st.download_button(
                 label="📥 Download Sample Consumption Data",
@@ -733,6 +749,16 @@ def build_ui():
                 file_name="sample_consumption_data.csv",
                 mime="text/csv"
             )
+    
+    # Footer
+    st.markdown("---")
+    st.markdown("""
+        <div style='text-align: center; color: #888;'>
+            <p>Powered by PVGIS API v5.2 | Solar data © European Commission</p>
+            <p>Made with ❤️ using Streamlit</p>
+        </div>
+    """, unsafe_allow_html=True)
+
 
 if __name__ == "__main__":
     build_ui()
