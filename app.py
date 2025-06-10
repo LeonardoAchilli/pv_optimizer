@@ -478,7 +478,7 @@ def build_ui():
             st.write("**Battery Parameters**")
             dod = st.slider("Depth of Discharge (%)", 70, 95, 85) / 100
             c_rate = st.slider("C-Rate", 0.3, 1.0, 0.7, 0.1)
-    
+    expected_rows = 35041
     # Main content area
     if uploaded_file is not None:
         try:
