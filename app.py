@@ -489,7 +489,7 @@ def build_ui():
                 st.error("❌ Error: CSV must contain a column named 'consumption_kWh'.")
                 return
             
-            actual_rows = len(consumption_df)
+            actual_rows = len(consumption_df)+1
             
             if actual_rows != expected_rows:
                 st.warning(f"""
