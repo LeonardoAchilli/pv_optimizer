@@ -1,3 +1,4 @@
+# (The first part of the file is the same...)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -11,20 +12,20 @@ from io import StringIO
 def get_pvgis_data(latitude: float, longitude: float) -> pd.DataFrame:
     """Fetches 15-minute interval PV generation data from PVGIS."""
     api_url = "https://re.jrc.ec.europa.eu/api/seriescalc"
+    
+    # --- FINAL FIX: Manually format numbers to strings to avoid locale issues ---
     params = {
-        'lat': latitude, 'lon': longitude, 'outputformat': 'csv',
+        'lat': str(latitude), 'lon': str(longitude), 'outputformat': 'csv',
         'pvcalculation': 1, 'peakpower': 1, 'loss': 0, 'angle': 35,
         'aspect': 0, 'raddatabase': 'PVGIS-SARAH2', 'startyear': 2020,
         'endyear': 2020, 'step': 15
     }
     
-    # --- FIX 1: Add a User-Agent header to the request ---
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'
     }
     
     try:
-        # Pass the headers with the request
         response = requests.get(api_url, params=params, headers=headers, timeout=30)
         response.raise_for_status()
         lines = response.text.splitlines()
@@ -43,7 +44,7 @@ def get_pvgis_data(latitude: float, longitude: float) -> pd.DataFrame:
         st.error(f"Error fetching PVGIS data: {e}")
         return None
 
-# (The run_simulation and find_optimal_system functions remain exactly the same)
+# (The rest of the file is exactly the same as the previous version)
 def run_simulation(pv_kwp, bess_kwh_nominal, pvgis_baseline_data, consumption_profile, config):
     """Runs the full 10-year simulation. (Content is identical to previous steps)."""
     dod, c_rate, charge_eff, discharge_eff, pv_degr_rate, bess_cal_degr_rate = (
@@ -135,15 +136,10 @@ def find_optimal_system(user_inputs, config, pvgis_baseline):
     progress_bar.empty()
     return best_result
 
-# ==============================================================================
-# SECTION 2: STREAMLIT USER INTERFACE
-# ==============================================================================
-
 def build_ui():
     st.set_page_config(page_title="PV & BESS Optimizer", layout="wide")
     st.title("☀️ Optimal PV & BESS Sizing Calculator")
     st.markdown("This tool helps you find the most financially viable Photovoltaic (PV) and Battery Energy Storage System (BESS) based on your specific needs.")
-
     with st.sidebar:
         st.header("1. Your Project Constraints")
         budget = st.number_input("Maximum Budget (€)", min_value=10000, max_value=500000, value=80000, step=1000)
@@ -156,7 +152,6 @@ def build_ui():
             "Upload your 15-minute consumption data (CSV)", type="csv",
             help="The CSV must have one column named 'consumption_kWh' with 35,040 rows for one year."
         )
-
     if uploaded_file is not None:
         try:
             consumption_df = pd.read_csv(uploaded_file)
@@ -168,7 +163,6 @@ def build_ui():
         except Exception as e:
             st.error(f"Error reading or parsing CSV file: {e}")
             return
-            
         if st.button("🚀 Find Optimal System"):
             user_inputs = { "budget": budget, "available_area_m2": available_area_m2, "consumption_profile_df": consumption_df }
             config = {
@@ -177,14 +171,11 @@ def build_ui():
                 'bess_calendar_degradation_rate': 0.015, 'grid_price_buy': 0.28,
                 'grid_price_sell': 0.05, 'wacc': 0.07
             }
-            
-            # --- FIX 2: Initialize optimal_system to None and restructure logic ---
             optimal_system = None 
             with st.spinner('Fetching solar data and running thousands of simulations... This may take a moment.'):
                 pvgis_baseline = get_pvgis_data(lat, lon)
                 if pvgis_baseline is not None:
                     optimal_system = find_optimal_system(user_inputs, config, pvgis_baseline)
-            
             if optimal_system:
                 st.success("Optimization Complete!")
                 st.header("🏆 Optimal System Recommendation")
