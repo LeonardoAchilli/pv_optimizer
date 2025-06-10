@@ -481,51 +481,33 @@ def build_ui():
                             if all_results_list and isinstance(all_results_list, list) and len(all_results_list) > 0:
                                 df_results = pd.DataFrame(all_results_list)
                                 
-                                # NPV Plot
                                 if all(col in df_results.columns for col in ['pv_kwp', 'bess_kwh', 'npv_eur']):
                                     st.subheader("NPV vs. PV System Size (for different BESS sizes)")
                                     df_pivot_npv = df_results.pivot(index='pv_kwp', columns='bess_kwh', values='npv_eur')
                                     df_pivot_npv.columns = [f"{col:.0f} kWh BESS" for col in df_pivot_npv.columns]
                                     st.line_chart(df_pivot_npv, height=400)
-                                else:
-                                    st.info("NPV sensitivity data is missing required columns (pv_kwp, bess_kwh, npv_eur).")
-
-                                # Payback Period Plot
+                                else: st.info("NPV sensitivity data is missing required columns.")
                                 if all(col in df_results.columns for col in ['pv_kwp', 'bess_kwh', 'payback_period_years']):
                                     st.subheader("Payback Period vs. PV System Size (for different BESS sizes)")
                                     df_pivot_payback = df_results.pivot(index='pv_kwp', columns='bess_kwh', values='payback_period_years')
                                     df_pivot_payback.columns = [f"{col:.0f} kWh BESS" for col in df_pivot_payback.columns]
                                     st.line_chart(df_pivot_payback, height=400)
-                                    st.caption("Note: Infinite payback periods may not be distinctly visualized or may be clipped by the chart's automatic y-axis scaling.")
-                                else:
-                                    st.info("Payback period sensitivity data is missing required columns (pv_kwp, bess_kwh, payback_period_years).")
-                            else:
-                                st.info("No sensitivity data available to plot (simulation might have run for a single point or data is missing).")
-                        except Exception as e_plot_sensitivity:
-                            st.error(f"Error plotting sensitivity graphs: {e_plot_sensitivity}")
-
-
+                                    st.caption("Note: Infinite payback periods may not be distinctly visualized.")
+                                else: st.info("Payback period sensitivity data is missing required columns.")
+                            else: st.info("No sensitivity data available to plot.")
+                        except Exception as e_plot_sensitivity: st.error(f"Error plotting sensitivity graphs: {e_plot_sensitivity}")
                     with st.expander("View Simulation Parameters & Full Results Matrix (Raw)"): 
-                        st.subheader("Simulation Parameters Used (Optimal Run):") 
-                        st.json({k: (f"{v:.3f}" if isinstance(v, float) else v) for k, v in config_sim.items()})
+                        st.subheader("Simulation Parameters Used (Optimal Run):"); st.json({k: (f"{v:.3f}" if isinstance(v, float) else v) for k, v in config_sim.items()})
                         if 'all_results' in final_results and final_results['all_results']:
-                            st.subheader("All Simulated Scenarios (Raw Data):") 
-                            df_all_res_raw = pd.DataFrame(final_results['all_results']) 
-                            st.dataframe(df_all_res_raw) 
+                            st.subheader("All Simulated Scenarios (Raw Data):"); df_all_res_raw = pd.DataFrame(final_results['all_results']); st.dataframe(df_all_res_raw) 
                             try:
                                 csv_export = df_all_res_raw.to_csv(index=False).encode('utf-8')
                                 st.download_button("📥 Download All Scenarios (CSV)", csv_export, "all_simulation_results.csv", "text/csv", key="dl_all_sim_btn")
                             except Exception as e_csv: st.error(f"Error creating CSV: {e_csv}")
                         else: st.info("No detailed scenario matrix (raw data) available.")
-
-                elif final_results and "error" in final_results:
-                     st.error(f"Simulation Error: {final_results['error']}")
-                else:
-                    st.error("Optimization did not yield a conclusive result. Please check inputs or try different parameters.")
-        
-        except Exception as e_main:
-            st.error(f"An unexpected error occurred: {str(e_main)}")
-
+                elif final_results and "error" in final_results: st.error(f"Simulation Error: {final_results['error']}")
+                else: st.error("Optimization did not yield a conclusive result. Please check inputs or try different parameters.")
+        except Exception as e_main: st.error(f"An unexpected error occurred: {str(e_main)}")
     else:
         st.info("Upload your 15-minute interval consumption data (CSV) to begin the optimization.")
         if st.button("📋 Generate Sample Consumption CSV", key="gen_sample_btn"):
@@ -535,8 +517,8 @@ def build_ui():
             st.download_button("📥 Download Sample CSV", csv_sample, "sample_consumption.csv", "text/csv", key="dl_sample_btn")
             st.success("Sample CSV generated and ready for download.")
 
-    st.markdown("--- 
-*Disclaimer: This tool provides estimates for informational purposes only. Consult professionals for financial decisions.*")
+    st.markdown("---")
+    st.markdown("*Disclaimer: This tool provides estimates for informational purposes only. Consult professionals for financial decisions.*")
 
 if __name__ == "__main__":
     build_ui()
