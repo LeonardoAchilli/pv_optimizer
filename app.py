@@ -37,6 +37,9 @@ def get_pvgis_data(latitude: float, longitude: float) -> pd.DataFrame:
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
     
+    # Debug info
+    st.info(f"Requesting solar data for location: {latitude:.4f}°N, {longitude:.4f}°E")
+    
     try:
         response = requests.get(api_url, params=params, headers=headers, timeout=30)
         response.raise_for_status()
@@ -44,58 +47,122 @@ def get_pvgis_data(latitude: float, longitude: float) -> pd.DataFrame:
         # Parse the CSV response
         lines = response.text.splitlines()
         
+        # Debug: Show first few lines
+        if len(lines) > 0:
+            st.info(f"PVGIS Response received: {len(lines)} lines")
+        
         # Find the start of the actual data
         data_start_line = 0
+        header_line = None
         for i, line in enumerate(lines):
-            if line.startswith('time,P,G(i),H_sun,T2m,WS10m,Int'):
+            if 'time' in line.lower() and ('P' in line or 'G(i)' in line):
                 data_start_line = i
+                header_line = line
                 break
         
         if data_start_line == 0:
             st.error("Could not find data header in PVGIS response")
+            # Show response for debugging
+            with st.expander("Show raw PVGIS response"):
+                st.text(response.text[:1000])
             return None
+        
+        # Debug: Show header found
+        st.success(f"Found data header at line {data_start_line}: {header_line}")
             
         # Extract the CSV data
         csv_data = StringIO('\n'.join(lines[data_start_line:]))
         df = pd.read_csv(csv_data)
         
-        # Convert time column to datetime
-        df['time'] = pd.to_datetime(df['time'], format='%Y%m%d:%H%M')
-        df = df.set_index('time')
+        # Debug: Show dataframe info
+        st.info(f"Parsed dataframe: {len(df)} rows, columns: {list(df.columns)}")
+        
+        # Check if 'time' column exists
+        if 'time' not in df.columns:
+            st.error(f"'time' column not found. Available columns: {list(df.columns)}")
+            return None
+        
+        # Convert time column to datetime with robust parsing
+        try:
+            # First, let's see what the time format looks like
+            sample_time = df['time'].iloc[0]
+            st.info(f"Sample time value: '{sample_time}'")
+            
+            # Try different formats
+            try:
+                df['time'] = pd.to_datetime(df['time'], format='%Y%m%d:%H%M')
+            except:
+                try:
+                    # Try ISO format
+                    df['time'] = pd.to_datetime(df['time'])
+                except:
+                    # Try without format
+                    df['time'] = pd.to_datetime(df['time'], dayfirst=False)
+            
+            df = df.set_index('time')
+            
+        except Exception as e:
+            st.error(f"Error parsing datetime: {e}")
+            st.error(f"First few time values: {df['time'].head().tolist()}")
+            return None
         
         # Convert power from W to kW
-        df['P_kW'] = df['P'] / 1000.0
+        if 'P' in df.columns:
+            df['P_kW'] = df['P'] / 1000.0
+        else:
+            st.error(f"'P' column not found. Available columns: {list(df.columns)}")
+            return None
         
         # Resample to 15-minute intervals if needed
         if len(df) < 35040:  # If we have hourly data
+            st.info(f"Resampling from {len(df)} hourly to 15-minute intervals...")
             df = df.resample('15min').interpolate(method='linear')
         
+        st.success(f"Successfully retrieved {len(df)} data points")
         return df[['P_kW']]
     
     except requests.exceptions.HTTPError as e:
         st.error(f"HTTP Error {e.response.status_code}: {e.response.text}")
         # Try alternative endpoint or database
+        st.warning("Trying alternative database (ERA5)...")
         try:
             params['raddatabase'] = 'PVGIS-ERA5'  # Try ERA5 as fallback
             response = requests.get(api_url, params=params, headers=headers, timeout=30)
             response.raise_for_status()
+            
             # Same parsing logic...
             lines = response.text.splitlines()
             data_start_line = 0
             for i, line in enumerate(lines):
-                if line.startswith('time,P,G(i),H_sun,T2m,WS10m,Int'):
+                if 'time' in line.lower() and ('P' in line or 'G(i)' in line):
                     data_start_line = i
                     break
+                    
+            if data_start_line == 0:
+                st.error("Could not find data header in ERA5 response")
+                return None
+                
             csv_data = StringIO('\n'.join(lines[data_start_line:]))
             df = pd.read_csv(csv_data)
-            df['time'] = pd.to_datetime(df['time'], format='%Y%m%d:%H%M')
+            
+            # Convert time with robust parsing
+            try:
+                df['time'] = pd.to_datetime(df['time'], format='%Y%m%d:%H%M')
+            except:
+                try:
+                    df['time'] = pd.to_datetime(df['time'])
+                except:
+                    df['time'] = pd.to_datetime(df['time'], infer_datetime_format=True)
+            
             df = df.set_index('time')
             df['P_kW'] = df['P'] / 1000.0
             if len(df) < 35040:
                 df = df.resample('15min').interpolate(method='linear')
+            
+            st.success(f"Successfully retrieved {len(df)} data points from ERA5")
             return df[['P_kW']]
-        except:
-            st.error(f"Error fetching PVGIS data: {e}")
+        except Exception as e2:
+            st.error(f"Error with ERA5 fallback: {e2}")
             return None
     except Exception as e:
         st.error(f"Error: {e}")
